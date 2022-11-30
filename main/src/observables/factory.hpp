@@ -38,6 +38,7 @@
 #include "time_energy_growth.hpp"
 #include "time_energies.hpp"
 #include "gravitational_waves.hpp"
+#include "wind_bubble_fraction.hpp"
 
 namespace sphexa
 {
@@ -78,7 +79,7 @@ static bool haveH5Attribute(const std::string& fname, const std::string& attribu
 
 #else
 
-static bool haveH5Attribute(const std::string& fname, const std::string& attributeToRead)
+[[maybe_unused]] static bool haveH5Attribute(const std::string& fname, const std::string& attributeToRead)
 {
     if (std::filesystem::exists(fname))
     {
@@ -121,6 +122,15 @@ std::unique_ptr<IObservables<Dataset>> observablesFactory(const std::string& tes
         }
     }
 #endif
+
+    if (testCase == "wind-shock")
+    {
+        double rhoInt       = WindShockConstants().at("rhoInt");
+        double uExt         = WindShockConstants().at("uExt");
+        double bubbleVolume = std::pow(WindShockConstants().at("rSphere"), 3) * 4.0 / 3.0 * M_PI;
+        double bubbleMass   = bubbleVolume * rhoInt;
+        return std::make_unique<WindBubble<Dataset>>(constantsFile, rhoInt, uExt, bubbleMass);
+    }
 
     return std::make_unique<TimeAndEnergy<Dataset>>(constantsFile);
 }

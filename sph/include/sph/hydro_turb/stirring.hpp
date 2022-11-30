@@ -32,17 +32,16 @@
 
 #include <cmath>
 
+#include "cstone/cuda/annotation.hpp"
 #include "cstone/util/tuple.hpp"
-#include "sph/util/annotation.hpp"
 
 namespace sph
 {
 
 //! @brief compute stirring acceleration for a single particle
 template<class Tc, class Ta, class T>
-CUDA_DEVICE_HOST_FUN auto stirParticle(size_t ndim, Tc xi, Tc yi, Tc zi, size_t numModes, const T* modes,
-                                       const T* phaseReal, const T* phaseImag, const T* amplitudes)
-
+HOST_DEVICE_FUN auto stirParticle(size_t ndim, Tc xi, Tc yi, Tc zi, size_t numModes, const T* modes, const T* phaseReal,
+                                  const T* phaseImag, const T* amplitudes)
 {
     Ta turbAx = 0.0;
     Ta turbAy = 0.0;
@@ -97,13 +96,13 @@ CUDA_DEVICE_HOST_FUN auto stirParticle(size_t ndim, Tc xi, Tc yi, Tc zi, size_t 
  * @param[in]     phaseReal         matrix (st_nmodes x dimension) containing real phases
  * @param[in]     phaseImag         matrix (st_nmodes x dimension) containing imaginary phases
  * @param[in]     amplitudes        amplitudes of modes
- * @param[in]     solWeight  normalized solenoidal weight
+ * @param[in]     solWeightNorm     normalized solenoidal weight
  *
  */
 template<class Tc, class Ta, class T>
 void computeStirring(size_t startIndex, size_t endIndex, size_t numDim, const Tc* x, const Tc* y, const Tc* z, Ta* ax,
                      Ta* ay, Ta* az, size_t numModes, const T* modes, const T* phaseReal, const T* phaseImag,
-                     const T* amplitudes, T solWeight)
+                     const T* amplitudes, T solWeightNorm)
 {
 #pragma omp parallel for schedule(static)
     for (size_t i = startIndex; i < endIndex; ++i)
@@ -111,15 +110,15 @@ void computeStirring(size_t startIndex, size_t endIndex, size_t numDim, const Tc
         auto [turbAx, turbAy, turbAz] =
             stirParticle<Tc, Ta, T>(numDim, x[i], y[i], z[i], numModes, modes, phaseReal, phaseImag, amplitudes);
 
-        ax[i] += solWeight * turbAx;
-        ay[i] += solWeight * turbAy;
-        az[i] += solWeight * turbAz;
+        ax[i] += solWeightNorm * turbAx;
+        ay[i] += solWeightNorm * turbAy;
+        az[i] += solWeightNorm * turbAz;
     }
 }
 
 template<class Tc, class Ta, class T>
 extern void computeStirringGpu(size_t startIndex, size_t endIndex, size_t numDim, const Tc* x, const Tc* y, const Tc* z,
                                Ta* ax, Ta* ay, Ta* az, size_t numModes, const T* modes, const T* phaseReal,
-                               const T* phaseImag, const T* amplitudes, T solWeight);
+                               const T* phaseImag, const T* amplitudes, T solWeightNorm);
 
 } // namespace sph

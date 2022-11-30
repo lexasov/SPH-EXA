@@ -1,8 +1,8 @@
 /*
  * MIT License
  *
- * Copyright (c) 2021 CSCS, ETH Zurich
- *               2021 University of Basel
+ * Copyright (c) 2022 CSCS, ETH Zurich
+ *               2022 University of Basel
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -39,6 +39,7 @@
 #include "mpi.h"
 
 #include "cstone/util/array.hpp"
+#include "conserved_gpu.h"
 
 namespace sphexa
 {
@@ -46,39 +47,42 @@ namespace sphexa
 template<class Dataset>
 auto localConservedQuantities(size_t startIndex, size_t endIndex, Dataset& d)
 {
-    using T = typename Dataset::RealType;
+    const auto* x    = d.x.data();
+    const auto* y    = d.y.data();
+    const auto* z    = d.z.data();
+    const auto* vx   = d.vx.data();
+    const auto* vy   = d.vy.data();
+    const auto* vz   = d.vz.data();
+    const auto* m    = d.m.data();
+    const auto* temp = d.temp.data();
 
-    const T* x  = d.x.data();
-    const T* y  = d.y.data();
-    const T* z  = d.z.data();
-    const T* vx = d.vx.data();
-    const T* vy = d.vy.data();
-    const T* vz = d.vz.data();
-    const T* m  = d.m.data();
-    const T* u  = d.u.data();
+    double eKin = 0.0;
+    double eInt = 0.0;
 
-    T eKin = 0.0;
-    T eInt = 0.0;
+    util::array<double, 3> linmom{0.0, 0.0, 0.0};
+    util::array<double, 3> angmom{0.0, 0.0, 0.0};
 
-    util::array<T, 3> linmom{0.0, 0.0, 0.0};
-    util::array<T, 3> angmom{0.0, 0.0, 0.0};
+    double sharedCv = sph::idealGasCv(d.muiConst, d.gamma);
+    bool   haveMui  = !d.mui.empty();
 
-#pragma omp declare reduction(+ : util::array <T, 3> : omp_out += omp_in) initializer(omp_priv(omp_orig))
+#pragma omp declare reduction(+ : util::array <double, 3> : omp_out += omp_in) initializer(omp_priv(omp_orig))
 
 #pragma omp parallel for reduction(+ : eKin, eInt, linmom, angmom)
     for (size_t i = startIndex; i < endIndex; i++)
     {
-        util::array<T, 3> X{x[i], y[i], z[i]};
-        util::array<T, 3> V{vx[i], vy[i], vz[i]};
-        auto              mi = m[i];
+        util::array<double, 3> X{x[i], y[i], z[i]};
+        util::array<double, 3> V{vx[i], vy[i], vz[i]};
+        auto                   mi = m[i];
 
+        auto cv = haveMui ? sph::idealGasCv(d.mui[i], d.gamma) : sharedCv;
         eKin += mi * norm2(V);
-        eInt += u[i] * mi;
+        //eInt += 3/2 * (d.gamma - 1) *cv * temp[i] * mi;
+        eInt += cv * temp[i] * mi;
         linmom += mi * V;
         angmom += mi * cross(X, V);
     }
 
-    return std::make_tuple(T(0.5) * eKin, eInt, linmom, angmom);
+    return std::make_tuple(0.5 * eKin, eInt, linmom, angmom);
 }
 
 /*! @brief Computation of globally conserved quantities
@@ -90,12 +94,33 @@ auto localConservedQuantities(size_t startIndex, size_t endIndex, Dataset& d)
  * @param[inout]  d            particle data set
  */
 template<class Dataset>
-void computeConservedQuantities(size_t startIndex, size_t endIndex, Dataset& d)
+void computeConservedQuantities(size_t startIndex, size_t endIndex, Dataset& d, MPI_Comm comm)
 {
-    using T                           = typename Dataset::RealType;
-    auto [eKin, eInt, linmom, angmom] = localConservedQuantities(startIndex, endIndex, d);
+    double               eKin, eInt;
+    cstone::Vec3<double> linmom, angmom;
+    size_t               ncsum = 0;
 
-    T quantities[9], globalQuantities[9];
+    if constexpr (cstone::HaveGpu<typename Dataset::AcceleratorType>{})
+    {
+        ncsum = cstone::reduceGpu(rawPtr(d.devData.nc) + startIndex, endIndex - startIndex, size_t(0));
+        std::tie(eKin, eInt, linmom, angmom) = conservedQuantitiesGpu(
+            sph::idealGasCv(d.muiConst, d.gamma), rawPtr(d.devData.x), rawPtr(d.devData.y), rawPtr(d.devData.z),
+            rawPtr(d.devData.vx), rawPtr(d.devData.vy), rawPtr(d.devData.vz), rawPtr(d.devData.temp),
+            rawPtr(d.devData.m), startIndex, endIndex);
+    }
+    else
+    {
+#pragma omp parallel for reduction(+ : ncsum)
+        for (size_t i = startIndex; i < endIndex; i++)
+        {
+            ncsum += d.nc[i];
+        }
+
+        std::tie(eKin, eInt, linmom, angmom) = localConservedQuantities(startIndex, endIndex, d);
+    }
+
+    util::array<double, 10> quantities, globalQuantities;
+    std::fill(globalQuantities.begin(), globalQuantities.end(), double(0));
 
     quantities[0] = eKin;
     quantities[1] = eInt;
@@ -106,35 +131,22 @@ void computeConservedQuantities(size_t startIndex, size_t endIndex, Dataset& d)
     quantities[6] = angmom[0];
     quantities[7] = angmom[1];
     quantities[8] = angmom[2];
+    quantities[9] = double(ncsum);
 
     int rootRank = 0;
-    MPI_Reduce(quantities, globalQuantities, 9, MpiType<T>{}, MPI_SUM, rootRank, MPI_COMM_WORLD);
+    MPI_Reduce(quantities.data(), globalQuantities.data(), quantities.size(), MpiType<double>{}, MPI_SUM, rootRank,
+               comm);
 
     d.ecin  = globalQuantities[0];
     d.eint  = globalQuantities[1];
     d.egrav = globalQuantities[2];
     d.etot  = d.ecin + d.eint + d.egrav;
 
-    util::array<T, 3> globalLinmom{globalQuantities[3], globalQuantities[4], globalQuantities[5]};
-    util::array<T, 3> globalAngmom{globalQuantities[6], globalQuantities[7], globalQuantities[8]};
-    d.linmom = std::sqrt(norm2(globalLinmom));
-    d.angmom = std::sqrt(norm2(globalAngmom));
-}
-
-size_t neighborsSum(size_t startIndex, size_t endIndex, gsl::span<const int> neighborsCount)
-{
-    size_t sum = 0;
-#pragma omp parallel for reduction(+ : sum)
-    for (size_t i = startIndex; i < endIndex; i++)
-    {
-        sum += neighborsCount[i];
-    }
-
-    int    rootRank  = 0;
-    size_t globalSum = 0;
-    MPI_Reduce(&sum, &globalSum, 1, MpiType<size_t>{}, MPI_SUM, rootRank, MPI_COMM_WORLD);
-
-    return globalSum;
+    util::array<double, 3> globalLinmom{globalQuantities[3], globalQuantities[4], globalQuantities[5]};
+    util::array<double, 3> globalAngmom{globalQuantities[6], globalQuantities[7], globalQuantities[8]};
+    d.linmom         = std::sqrt(norm2(globalLinmom));
+    d.angmom         = std::sqrt(norm2(globalAngmom));
+    d.totalNeighbors = size_t(globalQuantities[9]);
 }
 
 } // namespace sphexa

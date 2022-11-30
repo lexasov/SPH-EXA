@@ -36,21 +36,31 @@
 #include <algorithm>
 
 #include "cstone/sfc/box.hpp"
+#include "sph/eos.hpp"
 
+#include "io/mpi_file_utils.hpp"
 #include "isim_init.hpp"
 #include "grid.hpp"
-
-#include "sph/hydro_turb/turbulence_data.hpp"
-#include "sph/hydro_turb/create_modes.hpp"
 
 namespace sphexa
 {
 
 std::map<std::string, double> TurbulenceConstants()
 {
-    return {{"solWeight", 0.5},      {"stMaxModes", 100000}, {"Lbox", 1.0},       {"stMachVelocity", 0.3e0},
-            {"firstTimeStep", 1e-4}, {"epsilon", 1e-15},     {"rngSeed", 251299}, {"stSpectForm", 2},
-            {"mTotal", 1.0},         {"powerLawExp", 5 / 3}, {"anglesExp", 2.0}};
+    return {{"solWeight", 0.5},
+            {"stMaxModes", 100000},
+            {"Lbox", 1.0},
+            {"stMachVelocity", 0.3e0},
+            {"firstTimeStep", 1e-4},
+            {"epsilon", 1e-15},
+            {"rngSeed", 251299},
+            {"stSpectForm", 1},
+            {"mTotal", 1.0},
+            {"powerLawExp", 5 / 3},
+            {"anglesExp", 2.0},
+            {"gamma", 1.001},
+            {"mui", 0.62},
+            {"u0", 1000.}};
 }
 
 template<class Dataset>
@@ -62,63 +72,27 @@ void initTurbulenceHydroFields(Dataset& d, const std::map<std::string, double>& 
     double hInit         = std::cbrt(3.0 / (4. * M_PI) * ng0 * std::pow(Lbox, 3) / d.numParticlesGlobal) * 0.5;
     double firstTimeStep = constants.at("firstTimeStep");
 
+    d.gamma    = constants.at("gamma");
+    d.muiConst = constants.at("mui");
+    d.minDt    = firstTimeStep;
+    d.minDt_m1 = firstTimeStep;
+
+    auto cv    = sph::idealGasCv(d.muiConst, d.gamma);
+    auto temp0 = constants.at("u0") / cv;
+
     std::fill(d.m.begin(), d.m.end(), mPart);
     std::fill(d.du_m1.begin(), d.du_m1.end(), 0.0);
     std::fill(d.h.begin(), d.h.end(), hInit);
-    std::fill(d.mui.begin(), d.mui.end(), 10.0);
+    std::fill(d.mui.begin(), d.mui.end(), d.muiConst);
     std::fill(d.alpha.begin(), d.alpha.end(), d.alphamin);
-    std::fill(d.u.begin(), d.u.end(), 1000.0);
+    std::fill(d.temp.begin(), d.temp.end(), temp0);
 
-    d.minDt    = firstTimeStep;
-    d.minDt_m1 = firstTimeStep;
-    d.gamma    = 1.001;
-
-#pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < d.x.size(); i++)
-    {
-        d.vx[i]   = 0.;
-        d.vy[i]   = 0.;
-        d.vz[i]   = 0.;
-        d.x_m1[i] = d.x[i] - d.vx[i] * firstTimeStep;
-        d.y_m1[i] = d.y[i] - d.vy[i] * firstTimeStep;
-        d.z_m1[i] = d.z[i] - d.vz[i] * firstTimeStep;
-    }
-}
-
-template<class Dataset>
-void initTurbulenceModes(int rank, Dataset& turb, const std::map<std::string, double>& constants)
-{
-    using T = typename Dataset::RealType;
-
-    double eps         = constants.at("epsilon");
-    size_t stMaxModes  = constants.at("stMaxModes");
-    double Lbox        = constants.at("Lbox");
-    double velocity    = constants.at("stMachVelocity");
-    size_t stSpectForm = constants.at("stSpectForm");
-    double powerLawExp = constants.at("powerLawExp");
-    double anglesExp   = constants.at("anglesExp");
-
-    double twopi   = 2.0 * M_PI;
-    double energy  = 5.0e-3 * std::pow(velocity, 3) / Lbox;
-    double stirMin = (1.0 - eps) * twopi / Lbox;
-    double stirMax = (3.0 + eps) * twopi / Lbox;
-
-    turb.decayTime = Lbox / (2.0 * velocity);
-    turb.solWeight = constants.at("solWeight");
-    turb.gen.seed(constants.at("rngSeed"));
-
-    turb.amplitudes.resize(stMaxModes);
-    turb.modes.resize(stMaxModes * turb.numDim);
-
-    sph::createStirringModes(turb, Lbox, Lbox, Lbox, stMaxModes, energy, stirMax, stirMin, turb.numDim, stSpectForm,
-                             powerLawExp, anglesExp, rank == 0);
-
-    turb.resize(turb.numModes);
-    turb.uploadModes();
-
-    // fill phases with normal gaussian distributed random values with mean 0 and std-dev turb.variance
-    std::normal_distribution<T> dist(0, turb.variance);
-    std::generate(turb.phases.begin(), turb.phases.end(), [&turb, &dist]() { return dist(turb.gen); });
+    std::fill(d.vx.begin(), d.vx.end(), 0.);
+    std::fill(d.vy.begin(), d.vy.end(), 0.);
+    std::fill(d.vz.begin(), d.vz.end(), 0.);
+    std::fill(d.x_m1.begin(), d.x_m1.end(), 0.);
+    std::fill(d.y_m1.begin(), d.y_m1.end(), 0.);
+    std::fill(d.z_m1.begin(), d.z_m1.end(), 0.);
 }
 
 template<class Dataset>
@@ -134,8 +108,10 @@ public:
         constants_ = TurbulenceConstants();
     }
 
-    cstone::Box<typename Dataset::RealType> init(int rank, int numRanks, size_t cbrtNumPart, Dataset& d) const override
+    cstone::Box<typename Dataset::RealType> init(int rank, int numRanks, size_t cbrtNumPart,
+                                                 Dataset& simData) const override
     {
+        auto& d       = simData.hydro;
         using KeyType = typename Dataset::KeyType;
         using T       = typename Dataset::RealType;
 
@@ -146,13 +122,12 @@ public:
         size_t multiplicity  = std::rint(cbrtNumPart / std::cbrt(blockSize));
         d.numParticlesGlobal = multiplicity * multiplicity * multiplicity * blockSize;
 
-        cstone::Box<T> globalBox(-0.5, 0.5, true);
+        cstone::Box<T> globalBox(-0.5, 0.5, cstone::BoundaryType::periodic);
         auto [keyStart, keyEnd] = partitionRange(cstone::nodeRange<KeyType>(0), rank, numRanks);
         assembleCube<T>(keyStart, keyEnd, globalBox, multiplicity, xBlock, yBlock, zBlock, d.x, d.y, d.z);
 
         d.resize(d.x.size());
 
-        initTurbulenceModes(rank, d.turbulenceData, constants_);
         initTurbulenceHydroFields(d, constants_);
 
         return globalBox;

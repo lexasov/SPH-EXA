@@ -53,9 +53,10 @@ constexpr int clz32(uint32_t x)
 //! @brief count leading zeros, does not handle an input of 0
 constexpr int clz64(uint64_t x)
 {
-    constexpr int debruijn64[64] = {0,  47, 1,  56, 48, 27, 2,  60, 57, 49, 41, 37, 28, 16, 3,  61, 54, 58, 35, 52, 50, 42,
-                                    21, 44, 38, 32, 29, 23, 17, 11, 4,  62, 46, 55, 26, 59, 40, 36, 15, 53, 34, 51, 20, 43,
-                                    31, 22, 10, 45, 25, 39, 14, 33, 19, 30, 9,  24, 13, 18, 8,  12, 7,  6,  5,  63};
+    constexpr int debruijn64[64] = {0,  47, 1,  56, 48, 27, 2,  60, 57, 49, 41, 37, 28, 16, 3,  61,
+                                    54, 58, 35, 52, 50, 42, 21, 44, 38, 32, 29, 23, 17, 11, 4,  62,
+                                    46, 55, 26, 59, 40, 36, 15, 53, 34, 51, 20, 43, 31, 22, 10, 45,
+                                    25, 39, 14, 33, 19, 30, 9,  24, 13, 18, 8,  12, 7,  6,  5,  63};
 
     x |= x >> 1u;
     x |= x >> 2u;
@@ -78,7 +79,7 @@ constexpr int clz64(uint64_t x)
  *            for an input value of 0
  */
 HOST_DEVICE_FUN
-constexpr int countLeadingZeros(uint32_t x)
+constexpr int countLeadingZeros(unsigned x)
 {
 #ifdef __CUDA_ARCH__
     return __clz(x);
@@ -90,18 +91,18 @@ constexpr int countLeadingZeros(uint32_t x)
     // __builtin_clz(l) is implemented with the LZCNT instruction
     // which returns the number of bits for an input of zero,
     // so this check is not required in that case (flag: -march=haswell)
-    if (x == 0) return 8 * sizeof(uint32_t);
+    if (x == 0) return 8 * sizeof(unsigned);
     return __builtin_clz(x);
 
 #else
-    if (x == 0) return 8 * sizeof(uint32_t);
+    if (x == 0) return 8 * sizeof(unsigned);
     return detail::clz32(x);
 
 #endif
 }
 
 HOST_DEVICE_FUN
-constexpr int countLeadingZeros(uint64_t x)
+constexpr int countLeadingZeros(unsigned long long x)
 {
 #ifdef __CUDA_ARCH__
     return __clzll(x);
@@ -113,12 +114,14 @@ constexpr int countLeadingZeros(uint64_t x)
     // __builtin_clz(l) is implemented with the LZCNT instruction
     // which returns the number of bits for an input of zero,
     // so this check is not required in that case (flag: -march=haswell)
-    if (x == 0) return 8 * sizeof(uint64_t);
+    if (x == 0) return 8 * sizeof(unsigned long long);
     return __builtin_clzl(x);
 
 #else
-    if (x == 0) return 8 * sizeof(uint64_t);
+    if (x == 0) return 8 * sizeof(unsigned long long);
     return detail::clz64(x);
 #endif
 }
 
+HOST_DEVICE_FUN
+constexpr int countLeadingZeros(unsigned long x) { return countLeadingZeros((unsigned long long)x); }

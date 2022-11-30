@@ -37,20 +37,17 @@
 #include <memory>
 #include <vector>
 
-// hard code MPI for now
-#ifndef USE_MPI
-#define USE_MPI
-#endif
-
 #include "cstone/domain/domain.hpp"
+
 #include "init/factory.hpp"
-#include "observables/factory.hpp"
-#include "propagator/factory.hpp"
 #include "io/arg_parser.hpp"
 #include "io/ifile_writer.hpp"
+#include "observables/factory.hpp"
+#include "propagator/factory.hpp"
 #include "util/timer.hpp"
 #include "util/utils.hpp"
-#include "sph/particles_data.hpp"
+
+#include "simulation_data.hpp"
 
 #include "insitu_viz.h"
 
@@ -78,7 +75,7 @@ int main(int argc, char** argv)
 
     using Real    = double;
     using KeyType = uint64_t;
-    using Dataset = ParticlesData<Real, KeyType, AccType>;
+    using Dataset = SimulationData<Real, KeyType, AccType>;
     using Domain  = cstone::Domain<KeyType, Real, AccType>;
 
     const std::string        initCond          = parser.get("--init");
@@ -93,10 +90,6 @@ int main(int argc, char** argv)
     const std::string        outDirectory      = parser.get("--outDir");
     const bool               quiet             = parser.exists("--quiet");
 
-    if (outputFields.empty()) { outputFields = {"x", "y", "z", "vx", "vy", "vz", "h", "rho", "u", "p", "c"}; }
-
-    const std::string outFile = outDirectory + "dump_" + initCond;
-
     size_t ngmax = 150;
     size_t ng0   = 100;
 
@@ -110,15 +103,21 @@ int main(int argc, char** argv)
     auto fileWriter  = fileWriterFactory<Dataset>(ascii);
     auto observables = observablesFactory<Dataset>(initCond, constantsFile);
 
-    Dataset d;
-    d.comm = MPI_COMM_WORLD;
-    propagator->activateFields(d);
-    cstone::Box<Real> box = simInit->init(rank, numRanks, problemSize, d);
-    d.setOutputFields(outputFields);
+    Dataset simData;
+    simData.comm = MPI_COMM_WORLD;
+
+    propagator->activateFields(simData);
+    propagator->restoreState(initCond, simData.comm);
+    cstone::Box<Real> box = simInit->init(rank, numRanks, problemSize, simData);
+
+    auto& d = simData.hydro;
+    transferToDevice(d, 0, d.x.size(), propagator->conservedFields());
+    d.setOutputFields(outputFields.empty() ? propagator->conservedFields() : outputFields);
 
     bool  haveGrav = (d.g != 0.0);
     float theta    = parser.get("--theta", haveGrav ? 0.5f : 1.0f);
 
+    const std::string outFile = parser.get("-o", outDirectory + "dump_" + initCond + fileWriter->suffix());
     if (rank == 0 && (writeFrequencyStr != "0" || !writeExtra.empty()))
     {
         fileWriter->constants(simInit->constants(), outFile);
@@ -130,7 +129,7 @@ int main(int argc, char** argv)
     size_t bucketSize = std::max(bucketSizeFocus, d.numParticlesGlobal / (100 * numRanks));
     Domain domain(rank, numRanks, bucketSize, bucketSizeFocus, theta, box);
 
-    propagator->sync(domain, d);
+    propagator->sync(domain, simData);
     if (rank == 0) std::cout << "Domain synchronized, nLocalParticles " << d.x.size() << std::endl;
 
     viz::init_catalyst(argc, argv);
@@ -141,18 +140,19 @@ int main(int argc, char** argv)
     size_t startIteration = d.iteration;
     for (; !stopSimulation(d.iteration - 1, d.ttot, maxStepStr); d.iteration++)
     {
-        propagator->step(domain, d);
+        propagator->step(domain, simData);
 
-        observables->computeAndWrite(d, domain.startIndex(), domain.endIndex(), box);
-        propagator->printIterationTimings(domain, d);
+        observables->computeAndWrite(simData, domain.startIndex(), domain.endIndex(), box);
+        propagator->printIterationTimings(domain, simData);
 
         if (isPeriodicOutputStep(d.iteration, writeFrequencyStr) ||
             isPeriodicOutputTime(d.ttot - d.minDt, d.ttot, writeFrequencyStr) ||
             isExtraOutputStep(d.iteration, d.ttot - d.minDt, d.ttot, writeExtra))
         {
-            propagator->prepareOutput(d, domain.startIndex(), domain.endIndex());
-            fileWriter->dump(d, domain.startIndex(), domain.endIndex(), box, outFile);
-            propagator->finishOutput(d);
+            propagator->prepareOutput(simData, domain.startIndex(), domain.endIndex(), domain.box());
+            fileWriter->dump(simData, domain.startIndex(), domain.endIndex(), box, outFile);
+            propagator->dump(d.iteration, outFile);
+            propagator->finishOutput(simData);
         }
 
         viz::execute(d, domain.startIndex(), domain.endIndex());
@@ -169,7 +169,7 @@ int main(int argc, char** argv)
 //! @brief decide whether to stop the simulation based on evolved time (not wall-clock) or iteration count
 bool stopSimulation(size_t iteration, double time, const std::string& maxStepStr)
 {
-    bool lastIteration = strIsIntegral(maxStepStr) && iteration == std::stoi(maxStepStr);
+    bool lastIteration = strIsIntegral(maxStepStr) && iteration >= std::stoi(maxStepStr);
     bool simTimeLimit  = !strIsIntegral(maxStepStr) && time > std::stod(maxStepStr);
 
     return lastIteration || simTimeLimit;
@@ -183,8 +183,8 @@ void printHelp(char* name, int rank)
         printf("%s [OPTIONS]\n", name);
         printf("\nWhere possible options are:\n\n");
 
-        printf("\t--init \t\t Test case selection (evrard, sedov, noh, isobaric-cube, wind-shock) or an HDF5 file "
-               "with initial conditions\n");
+        printf("\t--init \t\t Test case selection (evrard, sedov, noh, isobaric-cube, wind-shock, turbulence)\n"
+               "\t\t\t or an HDF5 file with initial conditions\n\n");
         printf("\t-n NUM \t\t Initialize data with (approx when using glass blocks) NUM^3 global particles [50]\n");
         printf("\t--glass FILE\t Use glass block as template to generate initial x,y,z configuration\n\n");
 
@@ -195,22 +195,24 @@ void printHelp(char* name, int rank)
         printf("\t-s NUM \t\t int(NUM):  Number of iterations (time-steps) [200],\n\
                 \t real(NUM): Time   of simulation (time-model)\n\n");
 
-        printf("\t--wextra LIST \t Comma-separated list of steps (integers) or ~times (floating point)"
-               " at which to trigger output to file []\n\
-                   \t\t e.g.: --wextra 1,0.77,1.29,2.58\n\n");
+        printf("\t--wextra LIST \t Comma-separated list of steps (integers) or ~times (floating point)\n"
+               "\t\t\t at which to trigger file output\n"
+               "\t\t\t e.g.: --wextra 1,10,0.77 (output at after iteration 1 and 10 and at simulation time 0.77s\n\n");
 
         printf("\t-w NUM \t\t NUM<=0:    Disable file output [default],\n\
                 \t int(NUM):  Dump particle data every NUM iteration steps,\n\
                 \t real(NUM): Dump particle data every NUM seconds of simulation (not wall-clock) time \n\n");
 
-        printf("\t-f LIST \t Comma-separated list of field names to write for each dump [x,y,z,vx,vy,vz,h,rho,u,p,c]\n\
-                    \t\t e.g: -f x,y,z,h,rho\n\n");
+        printf("\t-f LIST \t Comma-separated list of field names to write for each dump.\n"
+               "\t\t\t e.g: -f x,y,z,h,rho\n"
+               "\t\t\t If omitted, the list will be set to all conserved fields,\n"
+               "\t\t\t resulting in a restartable output file\n\n");
 
         printf("\t--ascii \t Dump file in ASCII format [binary HDF5 by default]\n\n");
 
         printf("\t--outDir PATH \t Path to directory where output will be saved [./].\n\
-                    \t\t Note that directory must exist and be provided with ending slash,\n\
-                    \t\t e.g: --outDir /home/user/folderToSaveOutputFiles/\n\n");
+                    \t Note that directory must exist and be provided with ending slash,\n\
+                    \t e.g: --outDir /home/user/folderToSaveOutputFiles/\n\n");
 
         printf("\t--quiet \t Don't print anything to stdout\n\n");
     }

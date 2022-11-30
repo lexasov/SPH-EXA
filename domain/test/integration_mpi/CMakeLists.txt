@@ -27,12 +27,28 @@ addMpiTest(domain_nranks.cpp domain_nranks GlobalDomainNRanks 5)
 
 if (CMAKE_CUDA_COMPILER)
     # workaround for compiling MPI with nvcc on cray systems
-    if (MPI_CXX_INCLUDE_PATH STREQUAL "" AND DEFINED ENV{CRAY_MPICH2_DIR})
+    if (MPI_CXX_INCLUDE_PATH STREQUAL "" AND DEFINED ENV{CRAY_MPICH2_DIR} OR DEFINED ENV{CRAY_MPICH_DIR})
         message(STATUS "Applying MPI include workaround on CRAY")
         set(MPI_CXX_INCLUDE_PATH $ENV{MPICH_DIR}/include)
     endif()
 
     addMpiTest(exchange_halos_gpu.cpp exchange_halos_gpu GlobalHaloExchangeGpu 2)
     target_link_libraries(exchange_halos_gpu cstone_gpu CUDA::cudart)
+
+    addMpiTest(exchange_domain_gpu.cpp exchange_domain_gpu GlobalDomainExchangeGpu 2)
+    target_link_libraries(exchange_domain_gpu cstone_gpu CUDA::cudart)
+
+    addMpiTest(assignment_gpu.cpp assignment_gpu AssignmentGpu 2)
+    target_link_libraries(assignment_gpu cstone_gpu CUDA::cudart)
+
+    addMpiTest(domain_gpu.cpp domain_gpu DomainGpu 2)
+    target_link_libraries(domain_gpu cstone_gpu CUDA::cudart)
+
+    if (GPU_DIRECT)
+        target_compile_definitions(exchange_halos_gpu PRIVATE USE_GPU_DIRECT)
+        target_compile_definitions(exchange_domain_gpu PRIVATE USE_GPU_DIRECT)
+        target_compile_definitions(assignment_gpu PRIVATE USE_GPU_DIRECT)
+        target_compile_definitions(domain_gpu PRIVATE USE_GPU_DIRECT)
+    endif()
 endif()
 

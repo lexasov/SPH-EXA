@@ -29,41 +29,41 @@
  * @author Sebastian Keller <sebastian.f.keller@gmail.com>
  */
 
+#include "cstone/cuda/cuda_utils.cuh"
 #include "cstone/util/tuple.hpp"
 #include "cstone/util/util.hpp"
 
-#include "sph/sph.cuh"
+#include "sph/sph_gpu.hpp"
 #include "sph/eos.hpp"
-#include "sph/util/cuda_utils.cuh"
 
 namespace sph
 {
 namespace cuda
 {
 
-template<class Tu, class Trho, class Tp, class Tc>
-__global__ void cudaEOS_HydroStd(size_t firstParticle, size_t lastParticle, Tu gamma, const Tu* u, const Trho* rho,
-                                 Tp* p, Tc* c)
+template<class Tt, class Trho, class Tp, class Tc>
+__global__ void cudaEOS_HydroStd(size_t firstParticle, size_t lastParticle, Tt mui, Tt gamma, const Tt* temp,
+                                 const Trho* rho, Tp* p, Tc* c)
 {
     unsigned i = firstParticle + blockDim.x * blockIdx.x + threadIdx.x;
     if (i >= lastParticle) return;
 
-    util::tie(p[i], c[i]) = idealGasEOS(u[i], rho[i], gamma);
+    util::tie(p[i], c[i]) = idealGasEOS(temp[i], rho[i], mui, gamma);
 }
 
-template<class Tu, class Trho, class Tp, class Tc>
-void computeEOS_HydroStd(size_t firstParticle, size_t lastParticle, Tu gamma, const Tu* u, const Trho* rho, Tp* p,
-                         Tc* c)
+template<class Tt, class Trho, class Tp, class Tc>
+void computeEOS_HydroStd(size_t firstParticle, size_t lastParticle, Tt mui, Tt gamma, const Tt* temp, const Trho* rho,
+                         Tp* p, Tc* c)
 {
-    int numThreads = 256;
-    int numBlocks  = iceil(lastParticle - firstParticle, numThreads);
-    cudaEOS_HydroStd<<<numBlocks, numThreads>>>(firstParticle, lastParticle, gamma, u, rho, p, c);
-    CHECK_CUDA_ERR(cudaDeviceSynchronize());
+    unsigned numThreads = 256;
+    unsigned numBlocks  = iceil(lastParticle - firstParticle, numThreads);
+    cudaEOS_HydroStd<<<numBlocks, numThreads>>>(firstParticle, lastParticle, mui, gamma, temp, rho, p, c);
+    checkGpuErrors(cudaDeviceSynchronize());
 }
 
-template void computeEOS_HydroStd(size_t, size_t, double, const double*, const double*, double*, double*);
-template void computeEOS_HydroStd(size_t, size_t, double, const double*, const float*, float*, float*);
-template void computeEOS_HydroStd(size_t, size_t, float, const float*, const float*, float*, float*);
+template void computeEOS_HydroStd(size_t, size_t, double, double, const double*, const double*, double*, double*);
+template void computeEOS_HydroStd(size_t, size_t, double, double, const double*, const float*, float*, float*);
+template void computeEOS_HydroStd(size_t, size_t, float, float, const float*, const float*, float*, float*);
 
 } // namespace cuda
 } // namespace sph

@@ -48,11 +48,11 @@ TEST(MomentumEnergy, JLoop)
     std::array<double, lt::size> wh  = lt::createWharmonicLookupTable<double, lt::size>();
     std::array<double, lt::size> whd = lt::createWharmonicDerivativeLookupTable<double, lt::size>();
 
-    cstone::Box<T> box(0, 6, 0, 6, 0, 6, false, false, false);
+    cstone::Box<T> box(0, 6, cstone::BoundaryType::open);
 
     // particle 0 has 4 neighbors
-    std::vector<int> neighbors{1, 2, 3, 4};
-    int              neighborsCount = 4;
+    std::vector<cstone::LocalIndex> neighbors{1, 2, 3, 4};
+    unsigned                        neighborsCount = 4;
 
     std::vector<T> x{1.0, 1.1, 3.2, 1.3, 2.4};
     std::vector<T> y{1.1, 1.2, 1.3, 4.4, 5.5};
@@ -91,36 +91,10 @@ TEST(MomentumEnergy, JLoop)
     T maxvsignal = -1;
 
     // compute gradient for for particle 0
-    momentumAndEnergyJLoop(0,
-                           sincIndex,
-                           K,
-                           box,
-                           neighbors.data(),
-                           neighborsCount,
-                           x.data(),
-                           y.data(),
-                           z.data(),
-                           vx.data(),
-                           vy.data(),
-                           vz.data(),
-                           h.data(),
-                           m.data(),
-                           rho.data(),
-                           p.data(),
-                           c.data(),
-                           c11.data(),
-                           c12.data(),
-                           c13.data(),
-                           c22.data(),
-                           c23.data(),
-                           c33.data(),
-                           wh.data(),
-                           whd.data(),
-                           &grad_Px,
-                           &grad_Py,
-                           &grad_Pz,
-                           &du,
-                           &maxvsignal);
+    momentumAndEnergyJLoop(0, sincIndex, K, box, neighbors.data(), neighborsCount, x.data(), y.data(), z.data(),
+                           vx.data(), vy.data(), vz.data(), h.data(), m.data(), rho.data(), p.data(), c.data(),
+                           c11.data(), c12.data(), c13.data(), c22.data(), c23.data(), c33.data(), wh.data(),
+                           whd.data(), &grad_Px, &grad_Py, &grad_Pz, &du, &maxvsignal);
 
     EXPECT_NEAR(grad_Px, 10.483775138679292, 1e-10);
     EXPECT_NEAR(grad_Py, 0.090944092644194813, 1e-10);
@@ -141,11 +115,11 @@ TEST(MomentumEnergy, JLoopPBC)
 
     // box length in any dimension must be bigger than 4*h for any particle
     // otherwise the PBC evaluation does not select the closest image
-    cstone::Box<T> box(0, 10.5, 0, 10.5, 0, 10.5, true, true, true);
+    cstone::Box<T> box(0, 10.5, cstone::BoundaryType::periodic);
 
     // particle 0 has 4 neighbors
-    std::vector<int> neighbors{1, 2, 3, 4};
-    int              neighborsCount = 4;
+    std::vector<cstone::LocalIndex> neighbors{1, 2, 3, 4};
+    unsigned                        neighborsCount = 4;
 
     std::vector<T> x{1.0, 1.1, 3.2, 1.3, 9.4};
     std::vector<T> y{1.1, 1.2, 1.3, 8.4, 9.5};
@@ -185,36 +159,10 @@ TEST(MomentumEnergy, JLoopPBC)
     T maxvsignal = -1;
 
     // compute gradient for for particle 0
-    momentumAndEnergyJLoop(0,
-                           sincIndex,
-                           K,
-                           box,
-                           neighbors.data(),
-                           neighborsCount,
-                           x.data(),
-                           y.data(),
-                           z.data(),
-                           vx.data(),
-                           vy.data(),
-                           vz.data(),
-                           h.data(),
-                           m.data(),
-                           rho.data(),
-                           p.data(),
-                           c.data(),
-                           c11.data(),
-                           c12.data(),
-                           c13.data(),
-                           c22.data(),
-                           c23.data(),
-                           c33.data(),
-                           wh.data(),
-                           whd.data(),
-                           &grad_Px,
-                           &grad_Py,
-                           &grad_Pz,
-                           &du,
-                           &maxvsignal);
+    momentumAndEnergyJLoop(0, sincIndex, K, box, neighbors.data(), neighborsCount, x.data(), y.data(), z.data(),
+                           vx.data(), vy.data(), vz.data(), h.data(), m.data(), rho.data(), p.data(), c.data(),
+                           c11.data(), c12.data(), c13.data(), c22.data(), c23.data(), c33.data(), wh.data(),
+                           whd.data(), &grad_Px, &grad_Py, &grad_Pz, &du, &maxvsignal);
 
     EXPECT_NEAR(grad_Px, 18.964174134069442, 1e-10);
     EXPECT_NEAR(grad_Py, 37.008899054154412, 1e-10);

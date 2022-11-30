@@ -34,10 +34,15 @@
 #include <map>
 
 #include "cstone/sfc/box.hpp"
+#include "sph/eos.hpp"
 
 #include "io/file_utils.hpp"
+#ifdef SPH_EXA_HAVE_H5PART
+#include "io/mpi_file_utils.hpp"
+#endif
 #include "isim_init.hpp"
 #include "sedov_constants.hpp"
+#include "early_sync.hpp"
 #include "grid.hpp"
 
 namespace sphexa
@@ -59,18 +64,22 @@ void initSedovFields(Dataset& d, const std::map<std::string, double>& constants)
 
     double firstTimeStep = constants.at("firstTimeStep");
 
+    d.gamma    = constants.at("gamma");
+    d.muiConst = constants.at("mui");
+    d.minDt    = firstTimeStep;
+    d.minDt_m1 = firstTimeStep;
+
     std::fill(d.m.begin(), d.m.end(), mPart);
     std::fill(d.h.begin(), d.h.end(), hInit);
     std::fill(d.du_m1.begin(), d.du_m1.end(), 0.0);
-    std::fill(d.mui.begin(), d.mui.end(), 10.0);
+    std::fill(d.mui.begin(), d.mui.end(), d.muiConst);
     std::fill(d.alpha.begin(), d.alpha.end(), d.alphamin);
-
-    d.minDt    = firstTimeStep;
-    d.minDt_m1 = firstTimeStep;
 
     std::fill(d.vx.begin(), d.vx.end(), 0.0);
     std::fill(d.vy.begin(), d.vy.end(), 0.0);
     std::fill(d.vz.begin(), d.vz.end(), 0.0);
+
+    auto cv = sph::idealGasCv(d.muiConst, d.gamma);
 
 #pragma omp parallel for schedule(static)
     for (size_t i = 0; i < d.x.size(); i++)
@@ -80,11 +89,12 @@ void initSedovFields(Dataset& d, const std::map<std::string, double>& constants)
         T zi = d.z[i];
         T r2 = xi * xi + yi * yi + zi * zi;
 
-        d.u[i] = constants.at("ener0") * exp(-(r2 / width2)) + constants.at("u0");
+        T ui      = constants.at("ener0") * exp(-(r2 / width2)) + constants.at("u0");
+        d.temp[i] = ui / cv;
 
-        d.x_m1[i] = xi - d.vx[i] * firstTimeStep;
-        d.y_m1[i] = yi - d.vy[i] * firstTimeStep;
-        d.z_m1[i] = zi - d.vz[i] * firstTimeStep;
+        d.x_m1[i] = d.vx[i] * firstTimeStep;
+        d.y_m1[i] = d.vy[i] * firstTimeStep;
+        d.z_m1[i] = d.vz[i] * firstTimeStep;
     }
 }
 
@@ -96,19 +106,25 @@ class SedovGrid : public ISimInitializer<Dataset>
 public:
     SedovGrid() { constants_ = sedovConstants(); }
 
-    cstone::Box<typename Dataset::RealType> init(int rank, int numRanks, size_t cubeSide, Dataset& d) const override
+    cstone::Box<typename Dataset::RealType> init(int rank, int numRanks, size_t cubeSide,
+                                                 Dataset& simData) const override
     {
+        auto& d              = simData.hydro;
+        using KeyType        = typename Dataset::KeyType;
         using T              = typename Dataset::RealType;
         d.numParticlesGlobal = cubeSide * cubeSide * cubeSide;
 
         auto [first, last] = partitionRange(d.numParticlesGlobal, rank, numRanks);
         d.resize(last - first);
 
-        T r = constants_.at("r1");
+        T              r = constants_.at("r1");
+        cstone::Box<T> globalBox(-r, r, cstone::BoundaryType::periodic);
         regularGrid(r, cubeSide, first, last, d.x, d.y, d.z);
+        syncCoords<KeyType>(rank, numRanks, d.numParticlesGlobal, d.x, d.y, d.z, globalBox);
+        d.resize(d.x.size());
         initSedovFields(d, constants_);
 
-        return cstone::Box<T>(-r, r, true);
+        return globalBox;
     }
 
     const std::map<std::string, double>& constants() const override { return constants_; }
@@ -135,8 +151,10 @@ public:
      * @param[inout] d                particle dataset
      * @return                        the global coordinate bounding box
      */
-    cstone::Box<typename Dataset::RealType> init(int rank, int numRanks, size_t cbrtNumPart, Dataset& d) const override
+    cstone::Box<typename Dataset::RealType> init(int rank, int numRanks, size_t cbrtNumPart,
+                                                 Dataset& simData) const override
     {
+        auto& d       = simData.hydro;
         using KeyType = typename Dataset::KeyType;
         using T       = typename Dataset::RealType;
 
@@ -148,7 +166,7 @@ public:
         d.numParticlesGlobal = multiplicity * multiplicity * multiplicity * blockSize;
 
         T              r = constants_.at("r1");
-        cstone::Box<T> globalBox(-r, r, true);
+        cstone::Box<T> globalBox(-r, r, cstone::BoundaryType::periodic);
 
         auto [keyStart, keyEnd] = partitionRange(cstone::nodeRange<KeyType>(0), rank, numRanks);
         assembleCube<T>(keyStart, keyEnd, globalBox, multiplicity, xBlock, yBlock, zBlock, d.x, d.y, d.z);

@@ -30,27 +30,33 @@
 
 #pragma once
 
-#include <variant>
-
+#include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+#include <variant>
 
-#include "cstone/util/util.hpp"
-#include "util/cuda_utils.cuh"
-#include "data_util.hpp"
-#include "field_states.hpp"
+#include "cstone/cuda/cuda_utils.cuh"
+#include "cstone/primitives/primitives_gpu.h"
+#include "cstone/tree/accel_switch.hpp"
+#include "cstone/util/reallocate.hpp"
+
+#include "cstone/fields/data_util.hpp"
+#include "cstone/fields/field_states.hpp"
 #include "tables.hpp"
 
 namespace sphexa
 {
 
 template<typename T, class KeyType>
-class DeviceParticlesData : public FieldStates<DeviceParticlesData<T, KeyType>>
+class DeviceParticlesData : public cstone::FieldStates<DeviceParticlesData<T, KeyType>>
 {
     size_t allocatedTaskSize = 0;
 
     template<class FType>
     using DevVector = thrust::device_vector<FType>;
+
+    using Tmass   = float;
+    using XM1Type = float;
 
 public:
     // number of CUDA streams to use
@@ -61,7 +67,7 @@ public:
     struct neighbors_stream
     {
         cudaStream_t stream;
-        int*         d_neighborsCount;
+        unsigned*    d_neighborsCount;
     };
 
     struct neighbors_stream d_stream[NST];
@@ -71,28 +77,29 @@ public:
      * The length of these arrays equals the local number of particles including halos
      * if the field is active and is zero if the field is inactive.
      */
-    DevVector<T>       x, y, z, x_m1, y_m1, z_m1;    // Positions
-    DevVector<T>       vx, vy, vz;                   // Velocities
-    DevVector<T>       rho;                          // Density
-    DevVector<T>       temp;                         // Temperature
-    DevVector<T>       u;                            // Internal Energy
-    DevVector<T>       p;                            // Pressure
-    DevVector<T>       prho;                         // p / (kx * m^2 * gradh)
-    DevVector<T>       h;                            // Smoothing Length
-    DevVector<T>       m;                            // Mass
-    DevVector<T>       c;                            // Speed of sound
-    DevVector<T>       cv;                           // Specific heat
-    DevVector<T>       mue, mui;                     // mean molecular weight (electrons, ions)
-    DevVector<T>       divv, curlv;                  // Div(velocity), Curl(velocity)
-    DevVector<T>       ax, ay, az;                   // acceleration
-    DevVector<T>       du, du_m1;                    // energy rate of change (du/dt)
-    DevVector<T>       c11, c12, c13, c22, c23, c33; // IAD components
-    DevVector<T>       alpha;                        // AV coeficient
-    DevVector<T>       xm;                           // Volume element definition
-    DevVector<T>       kx;                           // Volume element normalization
-    DevVector<T>       gradh;                        // grad(h) term
-    DevVector<KeyType> codes;                        // Particle space-filling-curve keys
-    DevVector<int>     neighborsCount;               // number of neighbors of each particle
+    DevVector<T>        x, y, z;                      // Positions
+    DevVector<XM1Type>  x_m1, y_m1, z_m1;             // Difference to previous positions
+    DevVector<T>        vx, vy, vz;                   // Velocities
+    DevVector<T>        rho;                          // Density
+    DevVector<T>        temp;                         // Temperature
+    DevVector<T>        u;                            // Internal Energy
+    DevVector<T>        p;                            // Pressure
+    DevVector<T>        prho;                         // p / (kx * m^2 * gradh)
+    DevVector<T>        h;                            // Smoothing Length
+    DevVector<Tmass>    m;                            // Mass
+    DevVector<T>        c;                            // Speed of sound
+    DevVector<T>        cv;                           // Specific heat
+    DevVector<T>        mue, mui;                     // mean molecular weight (electrons, ions)
+    DevVector<T>        divv, curlv;                  // Div(velocity), Curl(velocity)
+    DevVector<T>        ax, ay, az;                   // acceleration
+    DevVector<XM1Type>  du, du_m1;                    // energy rate of change (du/dt)
+    DevVector<T>        c11, c12, c13, c22, c23, c33; // IAD components
+    DevVector<T>        alpha;                        // AV coeficient
+    DevVector<T>        xm;                           // Volume element definition
+    DevVector<T>        kx;                           // Volume element normalization
+    DevVector<T>        gradh;                        // grad(h) term
+    DevVector<KeyType>  keys;                         // Particle space-filling-curve keys
+    DevVector<unsigned> nc;                           // number of neighbors of each particle
 
     DevVector<T> wh;
     DevVector<T> whd;
@@ -113,7 +120,7 @@ public:
     {
         auto ret =
             std::tie(x, y, z, x_m1, y_m1, z_m1, vx, vy, vz, rho, u, p, prho, h, m, c, ax, ay, az, du, du_m1, c11, c12,
-                     c13, c22, c23, c33, mue, mui, temp, cv, xm, kx, divv, curlv, alpha, gradh, codes, neighborsCount);
+                     c13, c22, c23, c33, mue, mui, temp, cv, xm, kx, divv, curlv, alpha, gradh, keys, nc);
 
         static_assert(std::tuple_size_v<decltype(ret)> == fieldNames.size());
         return ret;
@@ -126,15 +133,37 @@ public:
      */
     auto data()
     {
-        using IntVecType = std::decay_t<decltype(neighborsCount)>;
-        using KeyVecType = std::decay_t<decltype(codes)>;
-        using FieldType  = std::variant<DevVector<float>*, DevVector<double>*, KeyVecType*, IntVecType*>;
+        using FieldType =
+            std::variant<DevVector<float>*, DevVector<double>*, DevVector<unsigned>*, DevVector<uint64_t>*>;
 
         return std::apply([](auto&... fields) { return std::array<FieldType, sizeof...(fields)>{&fields...}; },
                           dataTuple());
     }
 
-    void resize(size_t size);
+    void resize(size_t size)
+    {
+        double growthRate = 1.01;
+        auto   data_      = data();
+
+        auto deallocateVector = [size](auto* devVectorPtr)
+        {
+            using DevVector = std::decay_t<decltype(*devVectorPtr)>;
+            if (devVectorPtr->capacity() < size) { *devVectorPtr = DevVector{}; }
+        };
+
+        for (size_t i = 0; i < data_.size(); ++i)
+        {
+            if (this->isAllocated(i)) { std::visit(deallocateVector, data_[i]); }
+        }
+
+        for (size_t i = 0; i < data_.size(); ++i)
+        {
+            if (this->isAllocated(i))
+            {
+                std::visit([size, growthRate](auto* arg) { reallocateDevice(*arg, size, growthRate); }, data_[i]);
+            }
+        }
+    }
 
     DeviceParticlesData()
     {
@@ -146,7 +175,7 @@ public:
 
         for (int i = 0; i < NST; ++i)
         {
-            CHECK_CUDA_ERR(cudaStreamCreate(&d_stream[i].stream));
+            checkGpuErrors(cudaStreamCreate(&d_stream[i].stream));
         }
         resize_streams(taskSize);
     }
@@ -155,8 +184,8 @@ public:
     {
         for (int i = 0; i < NST; ++i)
         {
-            CHECK_CUDA_ERR(cudaStreamDestroy(d_stream[i].stream));
-            CHECK_CUDA_ERR(cudaFree(d_stream[i].d_neighborsCount));
+            checkGpuErrors(cudaStreamDestroy(d_stream[i].stream));
+            checkGpuErrors(cudaFree(d_stream[i].d_neighborsCount));
         }
     }
 
@@ -169,7 +198,7 @@ private:
             {
                 for (int i = 0; i < NST; ++i)
                 {
-                    CHECK_CUDA_ERR(cudaFree(d_stream[i].d_neighborsCount));
+                    checkGpuErrors(cudaFree(d_stream[i].d_neighborsCount));
                 }
             }
 
@@ -178,7 +207,7 @@ private:
 
             for (int i = 0; i < NST; ++i)
             {
-                CHECK_CUDA_ERR(cudaMalloc((void**)&(d_stream[i].d_neighborsCount), newTaskSize * sizeof(int)));
+                checkGpuErrors(cudaMalloc((void**)&(d_stream[i].d_neighborsCount), newTaskSize * sizeof(unsigned)));
             }
 
             allocatedTaskSize = newTaskSize;
@@ -189,7 +218,7 @@ private:
 template<class DataType, std::enable_if_t<cstone::HaveGpu<typename DataType::AcceleratorType>{}, int> = 0>
 void transferToDevice(DataType& d, size_t first, size_t last, const std::vector<std::string>& fields)
 {
-    auto hostData = d.data();
+    auto hostData   = d.data();
     auto deviceData = d.devData.data();
 
     auto launchTransfer = [first, last](const auto* hostField, auto* deviceField)
@@ -201,11 +230,10 @@ void transferToDevice(DataType& d, size_t first, size_t last, const std::vector<
             assert(hostField->size() > 0);
             assert(deviceField->size() > 0);
             size_t transferSize = (last - first) * sizeof(typename Type1::value_type);
-            CHECK_CUDA_ERR(cudaMemcpy(
-                rawPtr(*deviceField) + first, hostField->data() + first, transferSize, cudaMemcpyHostToDevice));
+            checkGpuErrors(cudaMemcpy(rawPtr(*deviceField) + first, hostField->data() + first, transferSize,
+                                      cudaMemcpyHostToDevice));
         }
-        else { throw std::runtime_error("Field type mismatch between CPU and GPU in copy to device");
-        }
+        else { throw std::runtime_error("Field type mismatch between CPU and GPU in copy to device"); }
     };
 
     for (const auto& field : fields)
@@ -231,11 +259,10 @@ void transferToHost(DataType& d, size_t first, size_t last, const std::vector<st
             assert(hostField->size() > 0);
             assert(deviceField->size() > 0);
             size_t transferSize = (last - first) * sizeof(typename Type1::value_type);
-            CHECK_CUDA_ERR(cudaMemcpy(
-                hostField->data() + first, rawPtr(*deviceField) + first, transferSize, cudaMemcpyDeviceToHost));
+            checkGpuErrors(cudaMemcpy(hostField->data() + first, rawPtr(*deviceField) + first, transferSize,
+                                      cudaMemcpyDeviceToHost));
         }
-        else { throw std::runtime_error("Field type mismatch between CPU and GPU in copy to device");
-        }
+        else { throw std::runtime_error("Field type mismatch between CPU and GPU in copy to device"); }
     };
 
     for (const auto& field : fields)
@@ -244,6 +271,12 @@ void transferToHost(DataType& d, size_t first, size_t last, const std::vector<st
             std::find(DataType::fieldNames.begin(), DataType::fieldNames.end(), field) - DataType::fieldNames.begin();
         std::visit(launchTransfer, hostData[fieldIdx], deviceData[fieldIdx]);
     }
+}
+
+template<class Vector, class T, std::enable_if_t<IsDeviceVector<Vector>{}, int> = 0>
+void fill(Vector& v, size_t first, size_t last, T value)
+{
+    cstone::fillGpu(rawPtr(v) + first, rawPtr(v) + last, value);
 }
 
 } // namespace sphexa

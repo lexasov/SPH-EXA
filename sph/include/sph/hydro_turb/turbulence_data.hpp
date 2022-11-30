@@ -35,9 +35,10 @@
 #include <random>
 #include <vector>
 
+#include "cstone/cuda/cuda_utils.hpp"
 #include "cstone/tree/accel_switch.hpp"
 
-#include "sph/util/cuda_utils.hpp"
+#include "sph/hydro_turb/create_modes.hpp"
 
 namespace sph
 {
@@ -52,6 +53,38 @@ class TurbulenceData
 public:
     using RealType = T;
 
+    TurbulenceData(const std::map<std::string, double>& constants, bool verbose)
+        : solWeight(constants.at("solWeight"))
+    {
+        initModes(constants, verbose);
+    }
+
+    //! Number of dimensions
+    const size_t numDim{3};
+    //! Variance of Ornstein-Uhlenbeck process
+    T variance;
+    T decayTime;
+    //! Solenoidal weight
+    const T solWeight;
+    //! Normalized solenoidal weight
+    T solWeightNorm;
+
+    std::mt19937 gen; // random engine
+
+    size_t         numModes;   // Number of computed nodes
+    std::vector<T> modes;      // Stirring Modes
+    std::vector<T> phases;     // O-U Phases
+    std::vector<T> amplitudes; // Amplitude of the modes
+
+    std::vector<T> phasesReal; // created from phases on each step
+    std::vector<T> phasesImag; // created from phases on each step
+
+    DeviceVector d_modes;
+    DeviceVector d_amplitudes;
+    DeviceVector d_phasesReal;
+    DeviceVector d_phasesImag;
+
+private:
     void resize(size_t numModes_)
     {
         modes.resize(numDim * numModes_);
@@ -72,25 +105,37 @@ public:
         }
     }
 
-    const size_t numDim{3}; // Number of dimensions
-    T            variance;  // Variance of Ornstein-Uhlenbeck process
-    T            decayTime;
-    T            solWeight; // Normalized Solenoidal weight
+    void initModes(const std::map<std::string, double>& constants, bool verbose)
+    {
+        double eps         = constants.at("epsilon");
+        size_t stMaxModes  = size_t(constants.at("stMaxModes"));
+        double Lbox        = constants.at("Lbox");
+        double velocity    = constants.at("stMachVelocity");
+        size_t stSpectForm = size_t(constants.at("stSpectForm"));
+        double powerLawExp = constants.at("powerLawExp");
+        double anglesExp   = constants.at("anglesExp");
 
-    std::mt19937 gen; // random engine
+        double twopi   = 2.0 * M_PI;
+        double energy  = 5.0e-3 * std::pow(velocity, 3) / Lbox;
+        double stirMin = (1.0 - eps) * twopi / Lbox;
+        double stirMax = (3.0 + eps) * twopi / Lbox;
 
-    size_t         numModes;   // Number of computed nodes
-    std::vector<T> modes;      // Stirring Modes
-    std::vector<T> phases;     // O-U Phases
-    std::vector<T> amplitudes; // Amplitude of the modes
+        decayTime = Lbox / (2.0 * velocity);
+        gen.seed(size_t(constants.at("rngSeed")));
 
-    std::vector<T> phasesReal; // created from phases on each step
-    std::vector<T> phasesImag; // created from phases on each step
+        amplitudes.resize(stMaxModes);
+        modes.resize(stMaxModes * numDim);
 
-    DeviceVector d_modes;
-    DeviceVector d_amplitudes;
-    DeviceVector d_phasesReal;
-    DeviceVector d_phasesImag;
+        createStirringModes(*this, Lbox, Lbox, Lbox, stMaxModes, energy, stirMax, stirMin, numDim, stSpectForm,
+                            powerLawExp, anglesExp, verbose);
+
+        resize(numModes);
+        uploadModes();
+
+        // fill phases with normal gaussian distributed random values with mean 0 and std-dev "variance"
+        std::normal_distribution<T> dist(0, variance);
+        std::generate(phases.begin(), phases.end(), [this, &dist]() { return dist(gen); });
+    }
 };
 
 } // namespace sph

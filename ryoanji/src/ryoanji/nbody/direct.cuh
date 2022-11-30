@@ -50,9 +50,8 @@ struct DirectConfig
 };
 
 template<class T>
-__global__ void directKernel(int numSource, const T* __restrict__ x, const T* __restrict__ y,
-                             const T* __restrict__ z, const T* __restrict__ m, const T* __restrict__ h, T* p, T* ax,
-                             T* ay, T* az)
+__global__ void directKernel(int numSource, const T* __restrict__ x, const T* __restrict__ y, const T* __restrict__ z,
+                             const T* __restrict__ m, const T* __restrict__ h, T* p, T* ax, T* ay, T* az)
 {
     unsigned targetIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -107,7 +106,7 @@ void directSum(std::size_t numBodies, const T* x, const T* y, const T* z, const 
     int numBlock   = (numBodies - 1) / numThreads + 1;
 
     directKernel<<<numBlock, numThreads>>>(numBodies, x, y, z, m, h, p, ax, ay, az);
-    ryoanji::kernelSuccess("direct sum");
+    kernelSuccess("direct sum");
 }
 
 } // namespace ryoanji

@@ -59,9 +59,9 @@ This routine produces 1d solutions for the evrard collapse:
 
 Usage examples:
     $ python ./compare_evrard.py --help
-    $ python ./compare_evrard.py dump_evrard.h5part --time 0.77
-    $ python ./compare_evrard.py dump_evrard.h5part --time 1.29
-    $ python ./compare_evrard.py dump_evrard.h5part --time 2.58
+    $ python ./compare_evrard.py dump_evrard.h5 --time 0.77
+    $ python ./compare_evrard.py dump_evrard.h5 --time 1.29
+    $ python ./compare_evrard.py dump_evrard.h5 --time 2.58
 
 """
 
@@ -343,7 +343,7 @@ def plotRadialProfile(props, xSim, ySim, xSol, ySol):
     plt.ylabel(props["ylabel"])
     plt.draw()
     plt.title(props["title"] + " : N = %8d, t = %.3f, step = %6d" % (len(xSim), props["tReal"], props["step"]))
-    plt.legend(loc="upper right")
+    plt.legend(loc="lower left")
     plt.savefig(props["fname"], format="png")
     plt.figure().clear()
 

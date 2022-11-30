@@ -2,55 +2,41 @@
 
 #include <vector>
 
+#include "cstone/util/tuple.hpp"
+
 #include "kernels.hpp"
 
 namespace sph
 {
 
-/*! @brief Reduced version of Ideal gas EOS for internal energy
- *
- * @param u     internal energy
- * @param rho   baryonic density
- * @param gamma adiabatic index
- *
- * This EOS is used for simple cases where we don't need the temperature.
- * Returns pressure, speed of sound
- */
-template<class T1, class T2>
-CUDA_DEVICE_HOST_FUN auto idealGasEOS(T1 u, T2 rho, T1 gamma)
+//! @brief returns the heat capacity for given mean molecular weight
+template<class T>
+HOST_DEVICE_FUN constexpr T idealGasCv(T mui, T gamma)
 {
-    using Tc = std::common_type_t<T1, T2>;
-
-    Tc tmp = u * (gamma - Tc(1));
-    Tc p   = rho * tmp;
-    Tc c   = std::sqrt(tmp);
-
-    return util::tuple<Tc, Tc>{p, c};
+    constexpr T R = 8.317e7;
+    return  R / (gamma - T(1)) / mui;
 }
 
-/*! @brief Ideal gas EOS for internal energy taking into account composition via mui
+/*! @brief Reduced version of Ideal gas EOS for internal energy
  *
  * @param u     internal energy
  * @param rho   baryonic density
  * @param mui   mean molecular weight
  * @param gamma adiabatic index
  *
- * Returns pressure, speed of sound, du/dT, and temperature
+ * This EOS is used for simple cases where we don't need the temperature.
+ * Returns pressure, speed of sound
  */
-template<class T1, class T2, class T3>
-CUDA_DEVICE_HOST_FUN auto idealGasEOS(T1 u, T2 rho, T3 mui, T1 gamma)
+template<class T1, class T2>
+HOST_DEVICE_FUN auto idealGasEOS(T1 temp, T2 rho, T1 mui, T1 gamma)
 {
-    using Tc = std::common_type_t<T1, T2, T3>;
+    using Tc = std::common_type_t<T1, T2>;
 
-    constexpr Tc R = 8.317e7;
+    Tc tmp = idealGasCv(mui, gamma) * temp * (gamma - Tc(1));
+    Tc p   = rho * tmp;
+    Tc c   = std::sqrt(tmp);
 
-    Tc cv   = Tc(1.5) * R / mui;
-    Tc temp = u / cv;
-    Tc tmp  = u * (gamma - Tc(1));
-    Tc p    = rho * tmp;
-    Tc c    = std::sqrt(tmp);
-
-    return util::tuple<Tc, Tc, Tc, Tc>{p, c, cv, temp};
+    return util::tuple<Tc, Tc>{p, c};
 }
 
 /*! @brief Polytropic EOS for a 1.4 M_sun and 12.8 km neutron star
@@ -62,7 +48,7 @@ CUDA_DEVICE_HOST_FUN auto idealGasEOS(T1 u, T2 rho, T3 mui, T1 gamma)
  * Returns pressure, and speed of sound
  */
 template<class T>
-CUDA_DEVICE_HOST_FUN auto polytropicEOS(T rho)
+HOST_DEVICE_FUN auto polytropicEOS(T rho)
 {
     constexpr T Kpol     = 2.246341237993810232e-10;
     constexpr T gammapol = 3.e0;

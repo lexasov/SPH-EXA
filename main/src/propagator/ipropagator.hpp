@@ -42,6 +42,8 @@ namespace sphexa
 template<class DomainType, class ParticleDataType>
 class Propagator
 {
+    using T = typename ParticleDataType::RealType;
+
 public:
     Propagator(size_t ngmax, size_t ng0, std::ostream& output, size_t rank)
         : timer(output, rank)
@@ -52,19 +54,30 @@ public:
     {
     }
 
+    //! @brief get a list of field strings marked as conserved at runtime
+    virtual std::vector<std::string> conservedFields() const = 0;
+
+    //! @brief Marks conserved and dependent fields inside the particle dataset as active, enabling memory allocation
     virtual void activateFields(ParticleDataType& d) = 0;
 
     virtual void sync(DomainType& domain, ParticleDataType& d) = 0;
 
     virtual void step(DomainType& domain, ParticleDataType& d) = 0;
 
-    virtual void prepareOutput(ParticleDataType& d, size_t startIndex, size_t endIndex){};
+    virtual void prepareOutput(ParticleDataType& d, size_t startIndex, size_t endIndex, const cstone::Box<T>&){};
     virtual void finishOutput(ParticleDataType& d){};
+
+    //! @brief this allows the possibility of saving propagator data to file if it is stateful
+    virtual void dump(size_t, const std::string&){};
+
+    //! @brief restore state from file if supported and it exists
+    virtual void restoreState(const std::string&, MPI_Comm){};
 
     virtual ~Propagator() = default;
 
-    void printIterationTimings(const DomainType& domain, const ParticleDataType& d)
+    void printIterationTimings(const DomainType& domain, const ParticleDataType& simData)
     {
+        const auto& d = simData.hydro;
         if (rank_ == 0)
         {
             printCheck(d.ttot, d.minDt, d.etot, d.eint, d.ecin, d.egrav, domain.box(), d.numParticlesGlobal,

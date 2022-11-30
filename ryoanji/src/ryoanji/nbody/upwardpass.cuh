@@ -34,6 +34,8 @@
 
 #include <chrono>
 
+#include "cstone/cuda/gpu_config.cuh"
+
 #include "kernel_wrapper.hpp"
 #include "kernel.hpp"
 
@@ -132,10 +134,10 @@ __global__ void upsweepCenters(TreeNodeIndex firstCell, TreeNodeIndex lastCell, 
     const int cellIdx = blockIdx.x * blockDim.x + threadIdx.x + firstCell;
     if (cellIdx >= lastCell) return;
 
-    const T   huge = T(1e10);
-    Vec4<T>   Xmin{+huge, +huge, +huge, +huge};
-    Vec4<T>   Xmax{-huge, -huge, -huge, -huge};
-    Vec4<T>   center;
+    const T huge = T(1e10);
+    Vec4<T> Xmin{+huge, +huge, +huge, +huge};
+    Vec4<T> Xmax{-huge, -huge, -huge, -huge};
+    Vec4<T> center;
 
     TreeNodeIndex firstChild = childOffsets[cellIdx];
 
@@ -197,29 +199,29 @@ void upsweep(int numSources, int numLeaves, int numLevels, T theta, const int2* 
     constexpr int numThreads = UpsweepConfig::numThreads;
 
     thrust::device_vector<Vec4<T>> d_cellXminmax(2 * numSources);
-    Vec4<T>*                       cellXmin = rawPtr(d_cellXminmax.data());
+    Vec4<T>*                       cellXmin = rawPtr(d_cellXminmax);
     Vec4<T>*                       cellXmax = cellXmin + numSources;
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    computeLeafCenters<<<(numLeaves - 1) / numThreads + 1, numThreads>>>(
-        x, y, z, m, h, leafToInternal, numLeaves, layout, centers, cellXmin, cellXmax);
+    computeLeafCenters<<<(numLeaves - 1) / numThreads + 1, numThreads>>>(x, y, z, m, h, leafToInternal, numLeaves,
+                                                                         layout, centers, cellXmin, cellXmax);
     for (int level = numLevels - 1; level >= 1; level--)
     {
         int numCellsLevel = levelRange[level].y - levelRange[level].x;
         int numBlocks     = (numCellsLevel - 1) / numThreads + 1;
-        upsweepCenters<<<numBlocks, numThreads>>>(
-            levelRange[level].x, levelRange[level].y, childOffsets, centers, cellXmin, cellXmax);
+        upsweepCenters<<<numBlocks, numThreads>>>(levelRange[level].x, levelRange[level].y, childOffsets, centers,
+                                                  cellXmin, cellXmax);
     }
 
-    computeLeafMultipoles<<<(numLeaves - 1) / numThreads + 1, numThreads>>>(
-        x, y, z, m, leafToInternal, numLeaves, layout, centers, Multipole);
+    computeLeafMultipoles<<<(numLeaves - 1) / numThreads + 1, numThreads>>>(x, y, z, m, leafToInternal, numLeaves,
+                                                                            layout, centers, Multipole);
     for (int level = numLevels - 1; level >= 1; level--)
     {
         int numCellsLevel = levelRange[level].y - levelRange[level].x;
         int numBlocks     = (numCellsLevel - 1) / numThreads + 1;
-        upsweepMultipoles<<<numBlocks, numThreads>>>(
-            levelRange[level].x, levelRange[level].y, childOffsets, centers, Multipole);
+        upsweepMultipoles<<<numBlocks, numThreads>>>(levelRange[level].x, levelRange[level].y, childOffsets, centers,
+                                                     Multipole);
     }
 
     kernelSuccess("upwardPass");
